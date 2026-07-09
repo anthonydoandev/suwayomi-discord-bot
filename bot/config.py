@@ -17,11 +17,11 @@ class Settings(BaseModel):
     komga_api_key: str
     komga_library_id: str
     bulk_confirm_threshold: int = 100
+    force_approval: bool = False  # testing: route admin through approval flow too
 
     @field_validator("source_ids")
     @classmethod
     def no_local_source(cls, v: list[str]) -> list[str]:
-        # id "0" is Suwayomi's Local source pseudo-source — never searchable
         return [s for s in v if s and s != "0"]
 
 
@@ -36,4 +36,5 @@ def load_settings() -> Settings:
         komga_api_key=os.environ["KOMGA_API_KEY"],
         komga_library_id=os.environ["KOMGA_LIBRARY_ID"],
         bulk_confirm_threshold=int(os.getenv("BULK_CONFIRM_THRESHOLD", "100")),
+        force_approval=os.getenv("FORCE_APPROVAL", "0") == "1",
     )
