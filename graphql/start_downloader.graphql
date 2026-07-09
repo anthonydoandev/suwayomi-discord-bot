@@ -1,0 +1,6 @@
+# Recovery op — input arg required even when empty (v2.3.2238)
+mutation StartDownloader {
+  startDownloader(input: {}) {
+    downloadStatus { state }
+  }
+}

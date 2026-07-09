@@ -1,0 +1,6 @@
+# Completion check for /manga status — DB read, no source traffic
+query ChaptersStatus($ids: [Int!]!) {
+  chapters(filter: {id: {in: $ids}}) {
+    nodes { id name isDownloaded }
+  }
+}

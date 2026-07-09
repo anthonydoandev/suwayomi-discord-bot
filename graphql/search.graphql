@@ -1,0 +1,7 @@
+# v2.3.2238: fetchSourceManga is a MUTATION (live source scrape)
+mutation Search($source: LongString!, $query: String!, $page: Int!) {
+  fetchSourceManga(input: {source: $source, type: SEARCH, query: $query, page: $page}) {
+    hasNextPage
+    mangas { id title thumbnailUrl inLibrary }
+  }
+}

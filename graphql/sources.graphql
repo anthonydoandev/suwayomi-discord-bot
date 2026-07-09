@@ -1,0 +1,4 @@
+# Exclude id "0" (Local source) from any search fan-out
+query Sources {
+  sources { nodes { id displayName lang isNsfw } }
+}

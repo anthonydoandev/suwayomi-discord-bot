@@ -1,0 +1,6 @@
+# Downloader auto-starts on enqueue (verified). STOPPED in response = idle, not failure.
+mutation Enqueue($ids: [Int!]!) {
+  enqueueChapterDownloads(input: {ids: $ids}) {
+    downloadStatus { state }
+  }
+}

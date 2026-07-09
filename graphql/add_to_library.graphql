@@ -1,0 +1,5 @@
+mutation AddToLibrary($id: Int!) {
+  updateManga(input: {id: $id, patch: {inLibrary: true}}) {
+    manga { id title inLibrary }
+  }
+}

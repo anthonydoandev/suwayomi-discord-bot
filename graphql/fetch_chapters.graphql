@@ -1,0 +1,6 @@
+# Mutation: scrapes chapter list from source. Chapter ids are per-instance DB ids — never cache across sessions.
+mutation FetchChapters($id: Int!) {
+  fetchChapters(input: {mangaId: $id}) {
+    chapters { id name sourceOrder chapterNumber isDownloaded }
+  }
+}

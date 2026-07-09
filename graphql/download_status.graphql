@@ -1,0 +1,7 @@
+# STOPPED + empty queue = idle/drained
+query DownloadStatus {
+  downloadStatus {
+    state
+    queue { chapter { name } progress state tries }
+  }
+}
