@@ -6,6 +6,7 @@ import discord
 from .config import Settings
 from .komga import KomgaClient
 from .suwayomi import Chapter, MangaResult, SuwayomiClient
+from .watcher import spawn, watch_downloads_then_scan
 
 
 class ResultSelect(discord.ui.Select):
@@ -98,9 +99,18 @@ class ConfirmView(discord.ui.View):
         await interaction.edit_original_response(
             content=(
                 f"✅ **{self.manga.title}** added — {len(ids)} chapters queued. "
-                "It appears in Komga as chapters finish."
+                "I'll post here when it's ready to read."
             ),
             view=None,
+        )
+        spawn(
+            watch_downloads_then_scan(
+                self.suwayomi,
+                self.komga,
+                interaction.channel,
+                self.manga.title,
+                ids,
+            )
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
