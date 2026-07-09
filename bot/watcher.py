@@ -1,8 +1,9 @@
 """Post-download completion watcher.
 
 Polls chapter download state after enqueue; on completion triggers a Komga
-scan and notifies the channel. Fire-and-forget — a bot restart orphans it,
-in which case Komga's 6h scheduled scan is the backstop.
+scan (silently — failures are logged, not posted) and posts the library
+showcase card to #manga-added. Fire-and-forget — a restart orphans it;
+Komga's 6h scheduled scan is the backstop.
 """
 from __future__ import annotations
 
@@ -11,8 +12,9 @@ import logging
 
 import discord
 
+from .embeds import build_added_embed
 from .komga import KomgaClient
-from .suwayomi import SuwayomiClient
+from .suwayomi import MangaDetails, SuwayomiClient
 
 log = logging.getLogger("manga-bot.watcher")
 
@@ -30,38 +32,31 @@ async def watch_downloads_then_scan(
     suwayomi: SuwayomiClient,
     komga: KomgaClient,
     channel: discord.abc.Messageable,
-    title: str,
+    details: MangaDetails,
+    source_name: str,
+    cover: bytes | None,
     chapter_ids: list[int],
-    mention: str = "",
     poll_seconds: int = 30,
     max_minutes: int = 120,
 ) -> None:
-    prefix = f"{mention} " if mention else ""
+    title = details.title
+    total = len(chapter_ids)
     try:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max_minutes * 60
-        total = len(chapter_ids)
 
+        done = 0
         while loop.time() < deadline:
             await asyncio.sleep(poll_seconds)
             chapters = await suwayomi.chapters_status(chapter_ids)
             done = sum(c.isDownloaded for c in chapters)
             log.info("watcher[%s]: %d/%d downloaded", title, done, total)
             if done == total:
-                ok = await komga.trigger_scan()
-                await channel.send(
-                    f"{prefix}📚 **{title}** — all {total} chapters downloaded. "
-                    + ("Komga scan triggered — ready to read."
-                       if ok else "Komga scan failed; it'll appear on the next scheduled scan.")
-                )
-                return
+                break
 
-        chapters = await suwayomi.chapters_status(chapter_ids)
-        done = sum(c.isDownloaded for c in chapters)
-        await komga.trigger_scan()
-        await channel.send(
-            f"{prefix}⏱️ **{title}** — {done}/{total} chapters downloaded after "
-            f"{max_minutes} min; scan triggered for what's available."
-        )
+        if not await komga.trigger_scan():
+            log.warning("watcher[%s]: komga scan trigger failed", title)
+        embed, files = build_added_embed(details, source_name, done, total, cover)
+        await channel.send(embed=embed, files=files)
     except Exception:
         log.exception("watcher[%s] crashed", title)

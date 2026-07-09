@@ -16,8 +16,12 @@ class Settings(BaseModel):
     komga_url: str
     komga_api_key: str
     komga_library_id: str
+    requests_channel_id: int
+    admin_requests_channel_id: int
+    request_updates_channel_id: int
+    manga_added_channel_id: int
     bulk_confirm_threshold: int = 100
-    force_approval: bool = False  # testing: route admin through approval flow too
+    force_approval: bool = False
 
     @field_validator("source_ids")
     @classmethod
@@ -35,6 +39,10 @@ def load_settings() -> Settings:
         komga_url=os.environ["KOMGA_URL"],
         komga_api_key=os.environ["KOMGA_API_KEY"],
         komga_library_id=os.environ["KOMGA_LIBRARY_ID"],
+        requests_channel_id=int(os.environ["REQUESTS_CHANNEL_ID"]),
+        admin_requests_channel_id=int(os.environ["ADMIN_REQUESTS_CHANNEL_ID"]),
+        request_updates_channel_id=int(os.environ["REQUEST_UPDATES_CHANNEL_ID"]),
+        manga_added_channel_id=int(os.environ["MANGA_ADDED_CHANNEL_ID"]),
         bulk_confirm_threshold=int(os.getenv("BULK_CONFIRM_THRESHOLD", "100")),
         force_approval=os.getenv("FORCE_APPROVAL", "0") == "1",
     )

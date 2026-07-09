@@ -1,4 +1,4 @@
-"""Slash command definitions: /manga request, /manga status."""
+"""Slash commands: /manga request, /manga status, /manga scan — locked to #requests."""
 from __future__ import annotations
 
 import discord
@@ -11,14 +11,21 @@ from .views import SearchView
 
 
 class MangaCommands(app_commands.Group):
-    """Registered as /manga <subcommand>."""
-
     def __init__(self, suwayomi: SuwayomiClient, komga: KomgaClient, settings: Settings):
         super().__init__(name="manga", description="Manga library requests")
         self.suwayomi = suwayomi
         self.komga = komga
         self.settings = settings
         self._source_names: dict[str, str] = {}
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.channel_id != self.settings.requests_channel_id:
+            await interaction.response.send_message(
+                f"Manga commands live in <#{self.settings.requests_channel_id}>.",
+                ephemeral=True,
+            )
+            return False
+        return True
 
     async def _sources(self) -> dict[str, str]:
         if not self._source_names:
@@ -28,10 +35,9 @@ class MangaCommands(app_commands.Group):
             }
         return self._source_names
 
-    @app_commands.command(name="request", description="Search for a manga and add it to the library")
+    @app_commands.command(name="request", description="Search for a manga and request it")
     @app_commands.describe(title="Manga title to search for")
     async def request(self, interaction: discord.Interaction, title: str):
-        # Search is a live multi-source scrape — always exceeds Discord's 3s ack window
         await interaction.response.defer()
         results = await self.suwayomi.search_all(await self._sources(), title)
         if not results:

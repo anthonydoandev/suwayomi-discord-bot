@@ -1,0 +1,6 @@
+# Op 9 (verified v2.3.2238): live details scrape — description/author/status
+mutation FetchMangaDetails($id: Int!) {
+  fetchManga(input: {id: $id}) {
+    manga { id title description thumbnailUrl author status }
+  }
+}

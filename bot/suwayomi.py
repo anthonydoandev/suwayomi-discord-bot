@@ -3,7 +3,7 @@
 Contract verified against v2.3.2238 (r2238, Stable) on 2026-07-09.
 Operations live in graphql/*.graphql — this module executes them verbatim.
 Schema findings encoded here:
-  - fetchSourceManga and fetchChapters are mutations (live source scrapes)
+  - fetchSourceManga, fetchChapters, fetchManga are mutations (live source scrapes)
   - enqueueChapterDownloads auto-starts the downloader; STOPPED = idle
   - startDownloader requires an empty input object
   - manga/chapter ids are per-instance DB ids: always fetch-then-enqueue
@@ -31,7 +31,7 @@ class Source(BaseModel):
     id: str
     displayName: str
     lang: str
-    isNsfw: bool
+    isNsfw: bool = False
 
 
 class MangaResult(BaseModel):
@@ -39,9 +39,17 @@ class MangaResult(BaseModel):
     title: str
     thumbnailUrl: str | None = None
     inLibrary: bool
-    # annotated during fan-out so the select menu can label by source
     source_id: str = ""
     source_name: str = ""
+
+
+class MangaDetails(BaseModel):
+    id: int
+    title: str
+    description: str | None = None
+    thumbnailUrl: str | None = None
+    author: str | None = None
+    status: str | None = None
 
 
 class Chapter(BaseModel):
@@ -102,12 +110,11 @@ class SuwayomiClient:
 
     async def search_all(
         self,
-        sources: dict[str, str],  # {source_id: display_name}
+        sources: dict[str, str],
         query: str,
         per_source_limit: int = 8,
     ) -> list[MangaResult]:
-        """Concurrent fan-out across sources. A slow/failing source degrades
-        gracefully instead of sinking the whole search."""
+        """Concurrent fan-out; a failing source degrades instead of sinking the search."""
         ids = list(sources)
         results = await asyncio.gather(
             *(self.search(sid, query) for sid in ids), return_exceptions=True
@@ -115,17 +122,33 @@ class SuwayomiClient:
         merged: list[MangaResult] = []
         for sid, res in zip(ids, results):
             if isinstance(res, BaseException):
-                continue  # source down/rate-limited — skip, don't fail
+                continue
             for m in res[:per_source_limit]:
                 m.source_name = sources[sid]
                 merged.append(m)
         return merged
 
-    # -- library / chapters -------------------------------------------------
+    # -- library / details / chapters ----------------------------------------
 
     async def add_to_library(self, manga_id: int) -> str:
         data = await self._gql("add_to_library", {"id": manga_id})
         return data["updateManga"]["manga"]["title"]
+
+    async def fetch_manga_details(self, manga_id: int) -> MangaDetails:
+        data = await self._gql("fetch_manga_details", {"id": manga_id})
+        return MangaDetails(**data["fetchManga"]["manga"])
+
+    async def fetch_thumbnail(self, thumbnail_url: str | None) -> bytes | None:
+        """Cover bytes over LAN — Discord's embed proxy can't reach VLAN 20, so
+        covers are re-uploaded as attachments. Degrades to None on any failure."""
+        if not thumbnail_url:
+            return None
+        try:
+            resp = await self._http.get(thumbnail_url)
+            resp.raise_for_status()
+            return resp.content
+        except Exception:
+            return None
 
     async def fetch_chapters(self, manga_id: int) -> list[Chapter]:
         data = await self._gql("fetch_chapters", {"id": manga_id})
@@ -137,7 +160,7 @@ class SuwayomiClient:
     async def enqueue_downloads(
         self, chapter_ids: list[int], batch_size: int = 50
     ) -> None:
-        """Batched enqueue — bulk-add discipline: never one giant mutation."""
+        """Batched enqueue — never one giant mutation."""
         for i in range(0, len(chapter_ids), batch_size):
             await self._gql("enqueue_downloads", {"ids": chapter_ids[i : i + batch_size]})
             await asyncio.sleep(0.5)

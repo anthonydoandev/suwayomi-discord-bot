@@ -1,10 +1,14 @@
-"""Discord UI: search select, admin confirm, and restart-surviving approval cards.
+"""Discord UI: search select, details card, admin confirm, friend request flow.
 
-Approval buttons are DynamicItems: state lives in the custom_id
-(manga:approve:<manga_id>:<requester_id>), re-hydrated by regex on any
-interaction — pending approvals survive bot restarts with no database.
-Chapter ids are deliberately NOT stored: per the v2.3.2238 contract they are
-per-instance DB ids, so Approve re-fetches fresh.
+Channel routing:
+  #requests        — command invocations, details card, Request button
+  #admin-requests  — approval cards (DynamicItem buttons, restart-surviving)
+  #request-updates — Seerr-style approved/denied notifications (no pings)
+  #manga-added     — download-complete cards (no pings)
+
+Chapter ids are never persisted in custom_ids (per-instance DB ids) —
+Approve always re-fetches. Deny recycles data from the admin card embed
+(title, description, chapter count, CDN cover url) — zero source traffic.
 """
 from __future__ import annotations
 
@@ -13,14 +17,40 @@ import re
 import discord
 
 from .config import Settings
+from .embeds import build_embed, build_update_embed
 from .komga import KomgaClient
-from .suwayomi import Chapter, MangaResult, SuwayomiClient
+from .suwayomi import Chapter, MangaDetails, MangaResult, SuwayomiClient
 from .watcher import spawn, watch_downloads_then_scan
 
 
 def _clients(interaction: discord.Interaction) -> tuple[SuwayomiClient, KomgaClient, Settings]:
-    bot = interaction.client  # MangaBot — carries the shared clients
+    bot = interaction.client
     return bot.suwayomi, bot.komga, bot.settings  # type: ignore[attr-defined]
+
+
+async def _channel(client: discord.Client, channel_id: int) -> discord.abc.Messageable:
+    return client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+
+
+async def _display_name(client: discord.Client, user_id: int) -> str:
+    user = client.get_user(user_id)
+    if user is None:
+        try:
+            user = await client.fetch_user(user_id)
+        except discord.HTTPException:
+            return "unknown"
+    return user.display_name
+
+
+def _card_field(message: discord.Message | None, name: str, default: str = "?") -> str:
+    if message and message.embeds:
+        for f in message.embeds[0].fields:
+            if f.name == name and f.value:
+                return f.value
+    return default
+
+
+# --------------------------- approval buttons -------------------------------
 
 
 class ApproveButton(
@@ -52,22 +82,35 @@ class ApproveButton(
 
         await interaction.response.defer()
         title = await suwayomi.add_to_library(self.manga_id)
+        details = await suwayomi.fetch_manga_details(self.manga_id)
+        cover = await suwayomi.fetch_thumbnail(details.thumbnailUrl)
         chapters = await suwayomi.fetch_chapters(self.manga_id)  # fresh ids, always
         ids = [c.id for c in chapters if not c.isDownloaded]
         await suwayomi.enqueue_downloads(ids)
 
+        source_name = _card_field(interaction.message, "Source", "Unknown")
+
         await interaction.edit_original_response(
-            content=(
-                f"✅ **{title}** approved — {len(ids)} chapters queued. "
-                f"<@{self.requester_id}> will be pinged when it's ready."
-            ),
-            embed=None,
+            content=f"✅ Approved — **{title}**, {len(ids)} chapters queued.",
             view=None,
         )
+
+        requester_name = await _display_name(interaction.client, self.requester_id)
+        embed, files = build_update_embed(
+            title=details.title,
+            description=details.description,
+            requester_name=requester_name,
+            n_chapters=len(chapters),
+            approved=True,
+            thumbnail=cover,
+        )
+        updates = await _channel(interaction.client, settings.request_updates_channel_id)
+        await updates.send(embed=embed, files=files)
+
+        added = await _channel(interaction.client, settings.manga_added_channel_id)
         spawn(
             watch_downloads_then_scan(
-                suwayomi, komga, interaction.channel,
-                title, ids, mention=f"<@{self.requester_id}>",
+                suwayomi, komga, added, details, source_name, cover, ids,
             )
         )
 
@@ -98,16 +141,86 @@ class DenyButton(
                 "Only the admin can deny requests.", ephemeral=True
             )
             return
+
+        # Recycle everything from the admin card — no source round-trips on deny
+        msg = interaction.message
+        card = msg.embeds[0] if msg and msg.embeds else None
+        title = card.title if card and card.title else "Request"
+        description = card.description if card else None
+        n_chapters = _card_field(msg, "Chapters")
+        cover_url = card.image.url if card and card.image else None
+
         await interaction.response.edit_message(
-            content=f"❌ Request denied. <@{self.requester_id}>", embed=None, view=None
+            content=f"❌ Denied — **{title}**.", view=None
         )
+
+        requester_name = await _display_name(interaction.client, self.requester_id)
+        embed, files = build_update_embed(
+            title=title,
+            description=description,
+            requester_name=requester_name,
+            n_chapters=n_chapters,
+            approved=False,
+            thumbnail=cover_url,
+        )
+        updates = await _channel(interaction.client, settings.request_updates_channel_id)
+        await updates.send(embed=embed, files=files)
 
 
 def approval_view(manga_id: int, requester_id: int) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)  # persistent — buttons re-match by custom_id
+    view = discord.ui.View(timeout=None)
     view.add_item(ApproveButton(manga_id, requester_id))
     view.add_item(DenyButton(manga_id, requester_id))
     return view
+
+
+# --------------------------- friend request flow ----------------------------
+
+
+class RequestView(discord.ui.View):
+    """Details card footer for non-admins: a single Request button."""
+
+    def __init__(
+        self,
+        manga: MangaResult,
+        details: MangaDetails,
+        n_chapters: int,
+        cover: bytes | None,
+        requester_id: int,
+    ):
+        super().__init__(timeout=180)
+        self.manga = manga
+        self.details = details
+        self.n_chapters = n_chapters
+        self.cover = cover
+        self.requester_id = requester_id
+
+    @discord.ui.button(label="Request", style=discord.ButtonStyle.primary)
+    async def request(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who searched can submit this request.", ephemeral=True
+            )
+            return
+        _, _, settings = _clients(interaction)
+        self.stop()
+
+        await interaction.response.edit_message(content="📥 **Requested**", view=None)
+
+        embed, files = build_embed(
+            self.details, self.manga.source_name, self.n_chapters,
+            self.cover, requester=interaction.user,
+        )
+        admin_ch = await _channel(interaction.client, settings.admin_requests_channel_id)
+        await admin_ch.send(
+            content="📥 New request",
+            embed=embed,
+            files=files,
+            view=approval_view(self.manga.id, self.requester_id),
+        )
+
+
+# --------------------------- search + admin confirm -------------------------
 
 
 class ResultSelect(discord.ui.Select):
@@ -139,34 +252,36 @@ class ResultSelect(discord.ui.Select):
             return
 
         await interaction.response.defer()
+        details = await view.suwayomi.fetch_manga_details(manga.id)
         chapters = await view.suwayomi.fetch_chapters(manga.id)
+        cover = await view.suwayomi.fetch_thumbnail(details.thumbnailUrl)
         view.stop()
         n = len(chapters)
+        embed, files = build_embed(details, manga.source_name, n, cover)
 
         is_admin = interaction.user.id == view.settings.admin_user_id
         if is_admin and not view.settings.force_approval:
-            confirm = ConfirmView(view.suwayomi, view.komga, view.settings, manga, chapters)
             gate = (
-                f"\n⚠️ Large series: this will download **all {n} chapters**."
+                f"⚠️ Large series: this will download **all {n} chapters**."
                 if n > view.settings.bulk_confirm_threshold
                 else ""
             )
             await interaction.edit_original_response(
-                content=f"**{manga.title}** [{manga.source_name}] — {n} chapters found.{gate}",
-                embed=None,
-                view=confirm,
+                content=gate or None,
+                embed=embed,
+                attachments=files,
+                view=ConfirmView(
+                    view.suwayomi, view.komga, view.settings,
+                    manga, details, cover, chapters,
+                ),
             )
             return
 
-        # Non-admin (or forced): post an approval card
-        embed = discord.Embed(title=manga.title, color=discord.Color.blurple())
-        embed.add_field(name="Source", value=manga.source_name, inline=True)
-        embed.add_field(name="Chapters", value=str(n), inline=True)
-        embed.add_field(name="Requested by", value=interaction.user.mention, inline=True)
         await interaction.edit_original_response(
-            content=f"📥 Request pending approval — <@{view.settings.admin_user_id}>",
+            content="Press **Request** to submit for approval:",
             embed=embed,
-            view=approval_view(manga.id, interaction.user.id),
+            attachments=files,
+            view=RequestView(manga, details, n, cover, interaction.user.id),
         )
 
 
@@ -192,6 +307,8 @@ class ConfirmView(discord.ui.View):
         komga: KomgaClient,
         settings: Settings,
         manga: MangaResult,
+        details: MangaDetails,
+        cover: bytes | None,
         chapters: list[Chapter],
     ):
         super().__init__(timeout=120)
@@ -199,6 +316,8 @@ class ConfirmView(discord.ui.View):
         self.komga = komga
         self.settings = settings
         self.manga = manga
+        self.details = details
+        self.cover = cover
         self.chapters = chapters
 
     @discord.ui.button(label="Download all", style=discord.ButtonStyle.success)
@@ -209,16 +328,14 @@ class ConfirmView(discord.ui.View):
         ids = [c.id for c in self.chapters if not c.isDownloaded]
         await self.suwayomi.enqueue_downloads(ids)
         await interaction.edit_original_response(
-            content=(
-                f"✅ **{self.manga.title}** added — {len(ids)} chapters queued. "
-                "I'll post here when it's ready to read."
-            ),
+            content=f"✅ **{self.manga.title}** added — {len(ids)} chapters queued.",
             view=None,
         )
+        added = await _channel(interaction.client, self.settings.manga_added_channel_id)
         spawn(
             watch_downloads_then_scan(
-                self.suwayomi, self.komga, interaction.channel,
-                self.manga.title, ids,
+                self.suwayomi, self.komga, added,
+                self.details, self.manga.source_name, self.cover, ids,
             )
         )
 
