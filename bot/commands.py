@@ -12,7 +12,7 @@ from .views import SearchView
 
 class MangaCommands(app_commands.Group):
     def __init__(self, suwayomi: SuwayomiClient, komga: KomgaClient, settings: Settings):
-        super().__init__(name="manga", description="Manga library requests")
+        super().__init__(name="request", description="Manga library requests")
         self.suwayomi = suwayomi
         self.komga = komga
         self.settings = settings
@@ -35,7 +35,7 @@ class MangaCommands(app_commands.Group):
             }
         return self._source_names
 
-    @app_commands.command(name="request", description="Search for a manga and request it")
+    @app_commands.command(name="manga", description="Search for a manga and request it")
     @app_commands.describe(title="Manga title to search for")
     async def request(self, interaction: discord.Interaction, title: str):
         await interaction.response.defer()

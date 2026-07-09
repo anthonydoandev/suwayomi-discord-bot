@@ -2,16 +2,20 @@
 
 Channel routing:
   #requests        — command invocations, details card, Request button
-  #admin-requests  — approval cards (DynamicItem buttons, restart-surviving)
+  #admin-requests  — friend approval cards (DynamicItem, restart-surviving);
+                     admin requests auto-approve and skip this channel
   #request-updates — Seerr-style approved/denied notifications (no pings)
   #manga-added     — download-complete cards (no pings)
 
 Chapter ids are never persisted in custom_ids (per-instance DB ids) —
 Approve always re-fetches. Deny recycles data from the admin card embed
 (title, description, chapter count, CDN cover url) — zero source traffic.
+Independent source fetches run under asyncio.gather — the user waits for
+the slowest call, not the sum.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 import discord
@@ -81,10 +85,13 @@ class ApproveButton(
             return
 
         await interaction.response.defer()
-        title = await suwayomi.add_to_library(self.manga_id)
-        details = await suwayomi.fetch_manga_details(self.manga_id)
+        # add/details/chapters are independent — gather; cover needs details' url
+        title, details, chapters = await asyncio.gather(
+            suwayomi.add_to_library(self.manga_id),
+            suwayomi.fetch_manga_details(self.manga_id),
+            suwayomi.fetch_chapters(self.manga_id),  # fresh ids, always
+        )
         cover = await suwayomi.fetch_thumbnail(details.thumbnailUrl)
-        chapters = await suwayomi.fetch_chapters(self.manga_id)  # fresh ids, always
         ids = [c.id for c in chapters if not c.isDownloaded]
         await suwayomi.enqueue_downloads(ids)
 
@@ -252,9 +259,13 @@ class ResultSelect(discord.ui.Select):
             return
 
         await interaction.response.defer()
-        details = await view.suwayomi.fetch_manga_details(manga.id)
-        chapters = await view.suwayomi.fetch_chapters(manga.id)
-        cover = await view.suwayomi.fetch_thumbnail(details.thumbnailUrl)
+        # Independent ops — run concurrently; thumbnail uses the search result's
+        # url (identical to details.thumbnailUrl, verified in the API contract)
+        details, chapters, cover = await asyncio.gather(
+            view.suwayomi.fetch_manga_details(manga.id),
+            view.suwayomi.fetch_chapters(manga.id),
+            view.suwayomi.fetch_thumbnail(manga.thumbnailUrl),
+        )
         view.stop()
         n = len(chapters)
         embed, files = build_embed(details, manga.source_name, n, cover)
