@@ -301,6 +301,9 @@ class SearchView(discord.ui.View):
 
 
 class ConfirmView(discord.ui.View):
+    """Admin path: same Request UX as friends, but auto-approved — no admin
+    card; posts the approved notification directly to #request-updates."""
+
     def __init__(
         self,
         suwayomi: SuwayomiClient,
@@ -320,17 +323,31 @@ class ConfirmView(discord.ui.View):
         self.cover = cover
         self.chapters = chapters
 
-    @discord.ui.button(label="Download all", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Request", style=discord.ButtonStyle.primary)
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.defer()
         self.stop()
+
         await self.suwayomi.add_to_library(self.manga.id)
         ids = [c.id for c in self.chapters if not c.isDownloaded]
         await self.suwayomi.enqueue_downloads(ids)
+
         await interaction.edit_original_response(
-            content=f"✅ **{self.manga.title}** added — {len(ids)} chapters queued.",
-            view=None,
+            content="📥 **Requested**", view=None
         )
+
+        # Auto-approved: post the green notification card directly
+        embed, files = build_update_embed(
+            title=self.details.title,
+            description=self.details.description,
+            requester_name=interaction.user.display_name,
+            n_chapters=len(self.chapters),
+            approved=True,
+            thumbnail=self.cover,
+        )
+        updates = await _channel(interaction.client, self.settings.request_updates_channel_id)
+        await updates.send(embed=embed, files=files)
+
         added = await _channel(interaction.client, self.settings.manga_added_channel_id)
         spawn(
             watch_downloads_then_scan(
